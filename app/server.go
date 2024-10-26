@@ -5,11 +5,47 @@ import (
 	"net"
 	"os"
 	"strings"
+	"regexp"
 )
 
-// Ensures gofmt doesn't remove the "net" and "os" imports above (feel free to remove this!)
-var _ = net.Listen
-var _ = os.Exit
+type requestLine struct {
+	method string
+	requestTarget string
+	httpVersion string
+}
+
+func parseRequestLine(target string) (requestLine, error) {
+	lineParts := strings.Split(target, " ")
+
+	if len(lineParts) != 3 {
+		return requestLine{}, fmt.Errorf("the request line could not be parsed correctly")
+	}
+
+	return requestLine{
+		method: lineParts[0],
+		requestTarget: lineParts[1],
+		httpVersion: lineParts[2],
+	}, nil
+
+}
+
+func handleEco(conn net.Conn, reqLine requestLine) {
+	echoRexp := regexp.MustCompile("/echo/(?P<data>.+)")
+	matches := echoRexp.FindStringSubmatch(reqLine.requestTarget)
+	data := matches[echoRexp.SubexpIndex("data")]
+	okResponse := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(data), data)
+	conn.Write([]byte(okResponse))
+}
+
+func handleDefault(conn net.Conn, reqLine requestLine) {
+	okResponse := "HTTP/1.1 200 OK\r\n\r\n"
+	errResponse := "HTTP/1.1 404 Not Found\r\n\r\n"
+	if reqLine.requestTarget == "/" {
+		conn.Write([]byte(okResponse))
+	} else {
+		conn.Write([]byte(errResponse))
+	}
+}
 
 func main() {
 	// You can use print statements as follows for debugging, they'll be visible when running tests.
@@ -29,8 +65,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	okResponse := "HTTP/1.1 200 OK\r\n\r\n"
-	errorResponse := "HTTP/1.1 404 Not Found\r\n\r\n"
+	defer conn.Close()
 
 	buffer := make([]byte, 256)
 	_, err = conn.Read(buffer)
@@ -43,17 +78,20 @@ func main() {
 
 	if len(httpMessage) == 0 {
 		fmt.Println("Error parsing HTTP Message")
-		conn.Close()
+		return
 	}
 
-	requestLine := httpMessage[0]
-	requestPath := strings.Split(requestLine, " ")[1]
+	requestLine, err := parseRequestLine(httpMessage[0])
 
-	if requestPath != "/" {
-		conn.Write([]byte(errorResponse))
+	if err != nil {
+		fmt.Println("Error parsing request line: ", err.Error())
+	}
+
+	echoRexp := regexp.MustCompile("/echo/(?P<data>.+)")
+	
+	if echoRexp.MatchString(requestLine.requestTarget) {
+		handleEco(conn, requestLine)
 	} else {
-		conn.Write([]byte(okResponse))
+		handleDefault(conn, requestLine)
 	}
-
-	conn.Close()	
 }
