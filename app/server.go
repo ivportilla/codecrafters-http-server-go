@@ -22,9 +22,13 @@ func main() {
 		os.Exit(1)
 	}
 	
-	_, err = l.Accept()
-	if err != nil {
-		fmt.Println("Error accepting connection: ", err.Error())
+	conn, errConn := l.Accept()
+	if errConn != nil {
+		fmt.Println("Error accepting connection: ", errConn.Error())
 		os.Exit(1)
 	}
+
+	defaultResponse := "HTTP/1.1 200 OK\r\n\r\n"
+
+	conn.Write([]byte(defaultResponse))
 }
