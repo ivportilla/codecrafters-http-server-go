@@ -29,6 +29,23 @@ func parseRequestLine(target string) (requestLine, error) {
 
 }
 
+func extractHeaders(httpMessage []string) map[string]string {
+	headers := make(map[string]string)
+
+	for _, line := range httpMessage[1:] {
+		if line == "" {
+			break
+		}
+		currentHeader := strings.Split(line, ":")
+		key := strings.TrimSpace(currentHeader[0])
+		val := strings.TrimSpace(currentHeader[1])
+		headers[key] = val
+	}
+
+	return headers
+
+}
+
 func handleEco(conn net.Conn, reqLine requestLine) {
 	echoRexp := regexp.MustCompile("/echo/(?P<data>.+)")
 	matches := echoRexp.FindStringSubmatch(reqLine.requestTarget)
@@ -45,6 +62,18 @@ func handleDefault(conn net.Conn, reqLine requestLine) {
 	} else {
 		conn.Write([]byte(errResponse))
 	}
+}
+
+func handleUserAgent(conn net.Conn, headers map[string]string) {
+	errResponse := "HTTP/1.1 400 Bad Request\r\n\r\n"
+	userAgent, ok := headers["User-Agent"]
+	fmt.Println("ok", ok, userAgent)
+	if !ok {
+		conn.Write([]byte(errResponse))
+		return
+	}
+	okResponse := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(userAgent), userAgent)
+	conn.Write([]byte(okResponse))
 }
 
 func main() {
@@ -67,11 +96,12 @@ func main() {
 
 	defer conn.Close()
 
-	buffer := make([]byte, 256)
+	buffer := make([]byte, 1024)
 	_, err = conn.Read(buffer)
 
 	if err != nil {
 		fmt.Println("Error reading connection: ", err.Error())
+		return
 	}
 
 	httpMessage := strings.Split(string(buffer), "\r\n")
@@ -88,9 +118,13 @@ func main() {
 	}
 
 	echoRexp := regexp.MustCompile("/echo/(?P<data>.+)")
+	userAgentRexp := regexp.MustCompile("/user-agent")
 	
 	if echoRexp.MatchString(requestLine.requestTarget) {
 		handleEco(conn, requestLine)
+	} else if userAgentRexp.MatchString(requestLine.requestTarget) {
+		headers := extractHeaders(httpMessage)
+		handleUserAgent(conn, headers)
 	} else {
 		handleDefault(conn, requestLine)
 	}
