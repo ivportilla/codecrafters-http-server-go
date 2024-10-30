@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"strings"
 	"regexp"
+	"strings"
+	"sync"
+	"time"
 )
 
 type requestLine struct {
@@ -76,28 +78,9 @@ func handleUserAgent(conn net.Conn, headers map[string]string) {
 	conn.Write([]byte(okResponse))
 }
 
-func main() {
-	// You can use print statements as follows for debugging, they'll be visible when running tests.
-	fmt.Println("Logs from your program will appear here!")
-
-	// Uncomment this block to pass the first stage
-	
-	l, err := net.Listen("tcp", "0.0.0.0:4221")
-	if err != nil {
-		fmt.Println("Failed to bind to port 4221")
-		os.Exit(1)
-	}
-	
-	conn, errConn := l.Accept()
-	if errConn != nil {
-		fmt.Println("Error accepting connection: ", errConn.Error())
-		os.Exit(1)
-	}
-
-	defer conn.Close()
-
+func reqHandler(conn net.Conn, ch chan net.Conn) {
 	buffer := make([]byte, 1024)
-	_, err = conn.Read(buffer)
+	_, err := conn.Read(buffer)
 
 	if err != nil {
 		fmt.Println("Error reading connection: ", err.Error())
@@ -128,4 +111,110 @@ func main() {
 	} else {
 		handleDefault(conn, requestLine)
 	}
+
+	defer func() {
+		ch <- conn
+	}()
+}
+
+const (
+	POOL_SIZE = 5
+	SLEEP_TIMEOUT = 200 * time.Millisecond
+)
+
+type ConnectionPool struct {
+	connections []net.Conn
+	mut sync.Mutex
+	maxSize int
+}
+
+func NewConnectionPool(maxSize int) *ConnectionPool {
+	return &ConnectionPool{
+		connections: make([]net.Conn, 0, maxSize),
+		maxSize: maxSize,
+	}
+}
+
+func (cp * ConnectionPool) Add(conn net.Conn) bool {
+	cp.mut.Lock()
+	defer cp.mut.Unlock()
+
+	if len(cp.connections) >= cp.maxSize {
+		return false
+	}
+
+	cp.connections = append(cp.connections, conn)
+	return true
+}
+
+func (cp * ConnectionPool) Remove(connToClose net.Conn) bool {
+	cp.mut.Lock()
+	defer cp.mut.Unlock()
+
+	idx := -1
+	for i, c := range cp.connections {
+		if c == connToClose {
+			idx = i
+			break;
+		}
+	}
+
+	if idx > -1 {
+		cp.connections = append(cp.connections[:idx], cp.connections[idx+1:]...)
+		fmt.Println("Connection deleted, new pool size: ", len(cp.connections))
+		return true
+	}
+
+	return false
+}
+
+func (cp * ConnectionPool) HandlePool(closeCh chan net.Conn) {
+	for {
+		select {
+		case toClose := <-closeCh:
+			toClose.Close();
+			cp.Remove(toClose)
+		case <-time.After(SLEEP_TIMEOUT):
+		}
+	}
+}
+
+func handleConnections(listener net.Listener, cp * ConnectionPool, closeCh chan net.Conn) {
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			fmt.Println("Error accepting connection: ", err.Error())
+		}
+
+		connAdded := cp.Add(conn)
+		if !connAdded {
+			fmt.Println("Connection pool is full at the moment, rejecting connection")
+			conn.Close()
+			continue
+		}
+		go reqHandler(conn, closeCh)
+		time.Sleep(SLEEP_TIMEOUT)
+	}
+}
+
+func main() {
+	// You can use print statements as follows for debugging, they'll be visible when running tests.
+	fmt.Println("Logs from your program will appear here!")
+
+	// Uncomment this block to pass the first stage
+	
+	l, err := net.Listen("tcp", "0.0.0.0:4221")
+	if err != nil {
+		fmt.Println("Failed to bind to port 4221")
+		os.Exit(1)
+	}
+
+	pool := NewConnectionPool(POOL_SIZE)
+	closeCh := make(chan net.Conn)
+
+	// Handle removal to delete connections from the pool
+	go pool.HandlePool(closeCh)
+
+	// Wait for new connections
+	handleConnections(l, pool, closeCh)
 }
