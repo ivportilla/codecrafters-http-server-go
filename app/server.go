@@ -10,20 +10,20 @@ import (
 	"time"
 )
 
-type requestLine struct {
+type RequestLine struct {
 	method string
 	requestTarget string
 	httpVersion string
 }
 
-func parseRequestLine(target string) (requestLine, error) {
+func parseRequestLine(target string) (RequestLine, error) {
 	lineParts := strings.Split(target, " ")
 
 	if len(lineParts) != 3 {
-		return requestLine{}, fmt.Errorf("the request line could not be parsed correctly")
+		return RequestLine{}, fmt.Errorf("the request line could not be parsed correctly")
 	}
 
-	return requestLine{
+	return RequestLine{
 		method: lineParts[0],
 		requestTarget: lineParts[1],
 		httpVersion: lineParts[2],
@@ -48,7 +48,7 @@ func extractHeaders(httpMessage []string) map[string]string {
 
 }
 
-func handleEco(conn net.Conn, reqLine requestLine) {
+func handleEco(conn net.Conn, reqLine RequestLine) {
 	echoRexp := regexp.MustCompile("/echo/(?P<data>.+)")
 	matches := echoRexp.FindStringSubmatch(reqLine.requestTarget)
 	data := matches[echoRexp.SubexpIndex("data")]
@@ -56,7 +56,7 @@ func handleEco(conn net.Conn, reqLine requestLine) {
 	conn.Write([]byte(okResponse))
 }
 
-func handleDefault(conn net.Conn, reqLine requestLine) {
+func handleDefault(conn net.Conn, reqLine RequestLine) {
 	okResponse := "HTTP/1.1 200 OK\r\n\r\n"
 	errResponse := "HTTP/1.1 404 Not Found\r\n\r\n"
 	if reqLine.requestTarget == "/" {
@@ -75,6 +75,21 @@ func handleUserAgent(conn net.Conn, headers map[string]string) {
 		return
 	}
 	okResponse := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(userAgent), userAgent)
+	conn.Write([]byte(okResponse))
+}
+
+func handleFiles(conn net.Conn, reqLine RequestLine) {
+	errResponse := "HTTP/1.1 404 Not Found\r\n\r\n"
+	fmt.Println("Target:", reqLine.requestTarget)
+	fileName := strings.Split(reqLine.requestTarget, "/")[2]
+	data, err := os.ReadFile(os.Args[2] + fileName)
+	if err != nil {
+		fmt.Printf("Error reading file %s: %s", fileName, err.Error())
+		conn.Write([]byte(errResponse))
+		return
+	}
+
+	okResponse := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: %d\r\n\r\n%s", len(data), string(data))
 	conn.Write([]byte(okResponse))
 }
 
@@ -108,6 +123,8 @@ func reqHandler(conn net.Conn, ch chan net.Conn) {
 	} else if userAgentRexp.MatchString(requestLine.requestTarget) {
 		headers := extractHeaders(httpMessage)
 		handleUserAgent(conn, headers)
+	} else if regexp.MustCompile("/files/.+").MatchString(requestLine.requestTarget) {
+		handleFiles(conn, requestLine)
 	} else {
 		handleDefault(conn, requestLine)
 	}
@@ -169,13 +186,9 @@ func (cp * ConnectionPool) Remove(connToClose net.Conn) bool {
 }
 
 func (cp * ConnectionPool) HandlePool(closeCh chan net.Conn) {
-	for {
-		select {
-		case toClose := <-closeCh:
-			toClose.Close();
-			cp.Remove(toClose)
-		case <-time.After(SLEEP_TIMEOUT):
-		}
+	for conn := range closeCh {
+		conn.Close()
+		cp.Remove(conn)
 	}
 }
 
