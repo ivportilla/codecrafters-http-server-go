@@ -2,105 +2,122 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"regexp"
 	"strings"
-	"sync"
-	"time"
 )
 
-type RequestLine struct {
-	method string
-	requestTarget string
-	httpVersion string
-}
-
-func parseRequestLine(target string) (RequestLine, error) {
-	lineParts := strings.Split(target, " ")
-
-	if len(lineParts) != 3 {
-		return RequestLine{}, fmt.Errorf("the request line could not be parsed correctly")
-	}
-
-	return RequestLine{
-		method: lineParts[0],
-		requestTarget: lineParts[1],
-		httpVersion: lineParts[2],
-	}, nil
-
-}
-
-func extractHeaders(httpMessage []string) map[string]string {
-	headers := make(map[string]string)
-
-	for _, line := range httpMessage[1:] {
-		if line == "" {
-			break
-		}
-		currentHeader := strings.Split(line, ":")
-		key := strings.TrimSpace(currentHeader[0])
-		val := strings.TrimSpace(currentHeader[1])
-		headers[key] = val
-	}
-
-	return headers
-
-}
-
-func handleEco(conn net.Conn, reqLine RequestLine) {
+func handleEco(conn net.Conn, req HttpRequest) {
 	echoRexp := regexp.MustCompile("/echo/(?P<data>.+)")
-	matches := echoRexp.FindStringSubmatch(reqLine.requestTarget)
+	matches := echoRexp.FindStringSubmatch(req.requestLine.requestTarget)
 	data := matches[echoRexp.SubexpIndex("data")]
-	okResponse := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(data), data)
-	conn.Write([]byte(okResponse))
+	response := HttpResponse{
+		code:    200,
+		message: "OK",
+		headers: map[string]string{
+			"Content-Type":   "text/plain",
+			"Content-Length": fmt.Sprintf("%d", len(data)),
+		},
+		data: data,
+	}
+	conn.Write([]byte(response.ToString()))
 }
 
-func handleDefault(conn net.Conn, reqLine RequestLine) {
-	okResponse := "HTTP/1.1 200 OK\r\n\r\n"
-	errResponse := "HTTP/1.1 404 Not Found\r\n\r\n"
-	if reqLine.requestTarget == "/" {
-		conn.Write([]byte(okResponse))
+func handleDefault(conn net.Conn, req HttpRequest) {
+	okResponse := HttpResponse{code: http.StatusOK, message: "OK"}
+	errResponse := HttpResponse{code: http.StatusNotFound, message: "Not Found"}
+	if req.requestLine.requestTarget == "/" {
+		conn.Write([]byte(okResponse.ToString()))
 	} else {
-		conn.Write([]byte(errResponse))
+		conn.Write([]byte(errResponse.ToString()))
 	}
 }
 
-func handleUserAgent(conn net.Conn, headers map[string]string) {
-	errResponse := "HTTP/1.1 400 Bad Request\r\n\r\n"
-	userAgent, ok := headers["User-Agent"]
-	fmt.Println("ok", ok, userAgent)
+func handleUserAgent(conn net.Conn, req HttpRequest) {
+	errResponse := HttpResponse{code: http.StatusBadRequest, message: "Bad Request"}
+	userAgent, ok := req.headers["User-Agent"]
 	if !ok {
-		conn.Write([]byte(errResponse))
+		conn.Write([]byte(errResponse.ToString()))
 		return
 	}
-	okResponse := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(userAgent), userAgent)
-	conn.Write([]byte(okResponse))
+	okRes := HttpResponse{
+		code:    http.StatusOK,
+		message: "OK",
+		headers: map[string]string{
+			"Content-Type":   "text/plain",
+			"Content-Length": fmt.Sprintf("%d", len(userAgent)),
+		},
+		data: userAgent,
+	}
+	conn.Write([]byte(okRes.ToString()))
 }
 
-func handleFiles(conn net.Conn, reqLine RequestLine) {
-	errResponse := "HTTP/1.1 404 Not Found\r\n\r\n"
-	fmt.Println("Target:", reqLine.requestTarget)
-	fileName := strings.Split(reqLine.requestTarget, "/")[2]
+func handleReadFile(conn net.Conn, req HttpRequest) {
+	errResponse := HttpResponse{code: http.StatusNotFound, message: "Not Found"}
+	fileName := strings.Split(req.requestLine.requestTarget, "/")[2]
 	data, err := os.ReadFile(os.Args[2] + fileName)
 	if err != nil {
-		fmt.Printf("Error reading file %s: %s", fileName, err.Error())
-		conn.Write([]byte(errResponse))
+		fmt.Printf("Error reading file %s: %v", fileName, err)
+		conn.Write([]byte(errResponse.ToString()))
 		return
 	}
 
-	okResponse := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: %d\r\n\r\n%s", len(data), string(data))
-	conn.Write([]byte(okResponse))
+	okRes := HttpResponse{
+		code:    http.StatusOK,
+		message: "OK",
+		headers: map[string]string{
+			"Content-Type":   "application/octet-stream",
+			"Content-Length": fmt.Sprintf("%d", len(data)),
+		},
+		data: string(data),
+	}
+
+	conn.Write([]byte(okRes.ToString()))
+}
+
+func handleWriteFile(conn net.Conn, req HttpRequest) {
+	errResponse := HttpResponse{code: http.StatusNotFound}
+	fileName := strings.Split(req.requestLine.requestTarget, "/")[2]
+	err := os.WriteFile(os.Args[2]+fileName, []byte(req.body), 0644)
+	if err != nil {
+		fmt.Printf("Error writing file %s: %s", fileName, err.Error())
+		conn.Write([]byte(errResponse.ToString()))
+		return
+	}
+
+	okResponse := HttpResponse{
+		code:    http.StatusCreated,
+		message: "Created",
+	}
+	conn.Write([]byte(okResponse.ToString()))
 }
 
 func reqHandler(conn net.Conn, ch chan net.Conn) {
+	defer func() {
+		ch <- conn
+	}()
+
 	buffer := make([]byte, 1024)
 	_, err := conn.Read(buffer)
 
 	if err != nil {
-		fmt.Println("Error reading connection: ", err.Error())
+		if err == io.EOF {
+			return
+		}
+		fmt.Printf("Error reading connection: %v\n", err)
 		return
 	}
+
+	req, err := parseHttpRequest(string(buffer))
+	if err != nil {
+		fmt.Printf("Error parsing http request: %v\n", err)
+		return
+	}
+
+	fmt.Printf("Request: %v\n", req)
 
 	httpMessage := strings.Split(string(buffer), "\r\n")
 
@@ -110,112 +127,29 @@ func reqHandler(conn net.Conn, ch chan net.Conn) {
 	}
 
 	requestLine, err := parseRequestLine(httpMessage[0])
-
 	if err != nil {
 		fmt.Println("Error parsing request line: ", err.Error())
+		return
 	}
 
 	echoRexp := regexp.MustCompile("/echo/(?P<data>.+)")
 	userAgentRexp := regexp.MustCompile("/user-agent")
-	
+
 	if echoRexp.MatchString(requestLine.requestTarget) {
-		handleEco(conn, requestLine)
+		handleEco(conn, req)
 	} else if userAgentRexp.MatchString(requestLine.requestTarget) {
-		headers := extractHeaders(httpMessage)
-		handleUserAgent(conn, headers)
-	} else if regexp.MustCompile("/files/.+").MatchString(requestLine.requestTarget) {
-		handleFiles(conn, requestLine)
+		handleUserAgent(conn, req)
+	} else if regexp.MustCompile("/files/.+").MatchString(requestLine.requestTarget) && requestLine.method == "GET" {
+		handleReadFile(conn, req)
+	} else if regexp.MustCompile("/files/.+").MatchString(requestLine.requestTarget) && requestLine.method == "POST" {
+		handleWriteFile(conn, req)
 	} else {
-		handleDefault(conn, requestLine)
-	}
-
-	defer func() {
-		ch <- conn
-	}()
-}
-
-const (
-	POOL_SIZE = 5
-	SLEEP_TIMEOUT = 200 * time.Millisecond
-)
-
-type ConnectionPool struct {
-	connections []net.Conn
-	mut sync.Mutex
-	maxSize int
-}
-
-func NewConnectionPool(maxSize int) *ConnectionPool {
-	return &ConnectionPool{
-		connections: make([]net.Conn, 0, maxSize),
-		maxSize: maxSize,
-	}
-}
-
-func (cp * ConnectionPool) Add(conn net.Conn) bool {
-	cp.mut.Lock()
-	defer cp.mut.Unlock()
-
-	if len(cp.connections) >= cp.maxSize {
-		return false
-	}
-
-	cp.connections = append(cp.connections, conn)
-	return true
-}
-
-func (cp * ConnectionPool) Remove(connToClose net.Conn) bool {
-	cp.mut.Lock()
-	defer cp.mut.Unlock()
-
-	idx := -1
-	for i, c := range cp.connections {
-		if c == connToClose {
-			idx = i
-			break;
-		}
-	}
-
-	if idx > -1 {
-		cp.connections = append(cp.connections[:idx], cp.connections[idx+1:]...)
-		fmt.Println("Connection deleted, new pool size: ", len(cp.connections))
-		return true
-	}
-
-	return false
-}
-
-func (cp * ConnectionPool) HandlePool(closeCh chan net.Conn) {
-	for conn := range closeCh {
-		conn.Close()
-		cp.Remove(conn)
-	}
-}
-
-func handleConnections(listener net.Listener, cp * ConnectionPool, closeCh chan net.Conn) {
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			fmt.Println("Error accepting connection: ", err.Error())
-		}
-
-		connAdded := cp.Add(conn)
-		if !connAdded {
-			fmt.Println("Connection pool is full at the moment, rejecting connection")
-			conn.Close()
-			continue
-		}
-		go reqHandler(conn, closeCh)
-		time.Sleep(SLEEP_TIMEOUT)
+		handleDefault(conn, req)
 	}
 }
 
 func main() {
-	// You can use print statements as follows for debugging, they'll be visible when running tests.
-	fmt.Println("Logs from your program will appear here!")
-
-	// Uncomment this block to pass the first stage
-	
+	fmt.Println("Server listening at port 4221")
 	l, err := net.Listen("tcp", "0.0.0.0:4221")
 	if err != nil {
 		fmt.Println("Failed to bind to port 4221")
