@@ -10,6 +10,8 @@ import (
 	"strings"
 )
 
+var allowedEncodings map[string]any = map[string]any{"gzip": nil}
+
 func handleEco(conn net.Conn, req HttpRequest) {
 	echoRexp := regexp.MustCompile("/echo/(?P<data>.+)")
 	matches := echoRexp.FindStringSubmatch(req.requestLine.requestTarget)
@@ -23,8 +25,9 @@ func handleEco(conn net.Conn, req HttpRequest) {
 		},
 		data: data,
 	}
-	if req.headers["Accept-Encoding"] == "gzip" {
-		response.headers["Content-Encoding"] = "gzip"
+	encoding := handleEncoding(req.headers, allowedEncodings)
+	if encoding != "" {
+		response.headers["Content-Encoding"] = encoding
 	}
 	conn.Write([]byte(response.ToString()))
 }
