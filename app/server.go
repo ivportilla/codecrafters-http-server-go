@@ -23,6 +23,9 @@ func handleEco(conn net.Conn, req HttpRequest) {
 		},
 		data: data,
 	}
+	if req.headers["Accept-Encoding"] == "gzip" {
+		response.headers["Content-Encoding"] = "gzip"
+	}
 	conn.Write([]byte(response.ToString()))
 }
 
