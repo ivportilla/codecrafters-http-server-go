@@ -1,6 +1,11 @@
 package main
 
-import "strings"
+import (
+	"bytes"
+	"compress/gzip"
+	"fmt"
+	"strings"
+)
 
 func handleEncoding(header map[string]string, allowedEncodings map[string]any) string {
 	if len(header["Accept-Encoding"]) == 0 {
@@ -16,4 +21,20 @@ func handleEncoding(header map[string]string, allowedEncodings map[string]any) s
 	}
 
 	return ""
+}
+
+func compressGzip(data []byte) ([]byte, error) {
+	var buffer bytes.Buffer
+
+	writer := gzip.NewWriter(&buffer)
+	_, err := writer.Write(data)
+	if err != nil {
+		return nil, fmt.Errorf("gzip writer failed: %v", err)
+	}
+
+	err = writer.Close()
+	if err != nil {
+		return nil, fmt.Errorf("gzip writer failed flushing data: %v", err)
+	}
+	return buffer.Bytes(), nil
 }

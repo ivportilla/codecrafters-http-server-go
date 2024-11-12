@@ -1,30 +1,30 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
-	"strings"
 )
 
 type HttpResponse struct {
 	code    int
 	message string
 	headers map[string]string
-	data    string
+	data    []byte
 }
 
-func (res *HttpResponse) ToString() string {
-	var strBuilder strings.Builder
+func (res *HttpResponse) ToBytes() []byte {
+	var builder bytes.Buffer
 	statusLine := fmt.Sprintf("HTTP/1.1 %d %s\r\n", res.code, res.message)
-	strBuilder.WriteString(statusLine)
+	builder.WriteString(statusLine)
 
 	for key, val := range res.headers {
 		header := fmt.Sprintf("%s: %s\r\n", key, val)
-		strBuilder.WriteString(header)
+		builder.WriteString(header)
 	}
 
-	strBuilder.WriteString("\r\n")
-	strBuilder.WriteString(res.data)
-	strBuilder.WriteString("\r\n")
+	builder.WriteString("\r\n")
+	builder.Write(res.data)
+	builder.WriteString("\r\n")
 
-	return strBuilder.String()
+	return builder.Bytes()
 }

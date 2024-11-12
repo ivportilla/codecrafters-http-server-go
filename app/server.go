@@ -10,12 +10,12 @@ import (
 	"strings"
 )
 
-var allowedEncodings map[string]any = map[string]any{"gzip": nil}
+var allowedEncodings = map[string]any{"gzip": compressGzip}
 
 func handleEco(conn net.Conn, req HttpRequest) {
-	echoRexp := regexp.MustCompile("/echo/(?P<data>.+)")
-	matches := echoRexp.FindStringSubmatch(req.requestLine.requestTarget)
-	data := matches[echoRexp.SubexpIndex("data")]
+	echoRegExp := regexp.MustCompile("/echo/(?P<data>.+)")
+	matches := echoRegExp.FindStringSubmatch(req.requestLine.requestTarget)
+	data := matches[echoRegExp.SubexpIndex("data")]
 	response := HttpResponse{
 		code:    200,
 		message: "OK",
@@ -23,22 +23,36 @@ func handleEco(conn net.Conn, req HttpRequest) {
 			"Content-Type":   "text/plain",
 			"Content-Length": fmt.Sprintf("%d", len(data)),
 		},
-		data: data,
+		data: []byte(data),
 	}
 	encoding := handleEncoding(req.headers, allowedEncodings)
-	if encoding != "" {
-		response.headers["Content-Encoding"] = encoding
+	if encoding == "" {
+		conn.Write(response.ToBytes())
+		return
 	}
-	conn.Write([]byte(response.ToString()))
+
+	response.headers["Content-Encoding"] = encoding
+	compressFn := allowedEncodings[encoding].(func([]byte) ([]byte, error))
+	compressedData, err := compressFn(response.data)
+	if err != nil {
+		fmt.Printf("Error compressing data: %v\n", err)
+		errResponse := HttpResponse{code: http.StatusInternalServerError, message: "Error compressing data"}
+		conn.Write(errResponse.ToBytes())
+		return
+	}
+
+	response.headers["Content-Length"] = fmt.Sprintf("%d", len(compressedData))
+	response.data = compressedData
+	conn.Write(response.ToBytes())
 }
 
 func handleDefault(conn net.Conn, req HttpRequest) {
 	okResponse := HttpResponse{code: http.StatusOK, message: "OK"}
 	errResponse := HttpResponse{code: http.StatusNotFound, message: "Not Found"}
 	if req.requestLine.requestTarget == "/" {
-		conn.Write([]byte(okResponse.ToString()))
+		conn.Write(okResponse.ToBytes())
 	} else {
-		conn.Write([]byte(errResponse.ToString()))
+		conn.Write(errResponse.ToBytes())
 	}
 }
 
@@ -46,7 +60,7 @@ func handleUserAgent(conn net.Conn, req HttpRequest) {
 	errResponse := HttpResponse{code: http.StatusBadRequest, message: "Bad Request"}
 	userAgent, ok := req.headers["User-Agent"]
 	if !ok {
-		conn.Write([]byte(errResponse.ToString()))
+		conn.Write(errResponse.ToBytes())
 		return
 	}
 	okRes := HttpResponse{
@@ -56,9 +70,9 @@ func handleUserAgent(conn net.Conn, req HttpRequest) {
 			"Content-Type":   "text/plain",
 			"Content-Length": fmt.Sprintf("%d", len(userAgent)),
 		},
-		data: userAgent,
+		data: []byte(userAgent),
 	}
-	conn.Write([]byte(okRes.ToString()))
+	conn.Write(okRes.ToBytes())
 }
 
 func handleReadFile(conn net.Conn, req HttpRequest) {
@@ -67,7 +81,7 @@ func handleReadFile(conn net.Conn, req HttpRequest) {
 	data, err := os.ReadFile(os.Args[2] + fileName)
 	if err != nil {
 		fmt.Printf("Error reading file %s: %v", fileName, err)
-		conn.Write([]byte(errResponse.ToString()))
+		conn.Write(errResponse.ToBytes())
 		return
 	}
 
@@ -78,10 +92,10 @@ func handleReadFile(conn net.Conn, req HttpRequest) {
 			"Content-Type":   "application/octet-stream",
 			"Content-Length": fmt.Sprintf("%d", len(data)),
 		},
-		data: string(data),
+		data: data,
 	}
 
-	conn.Write([]byte(okRes.ToString()))
+	conn.Write(okRes.ToBytes())
 }
 
 func handleWriteFile(conn net.Conn, req HttpRequest) {
@@ -90,7 +104,7 @@ func handleWriteFile(conn net.Conn, req HttpRequest) {
 	err := os.WriteFile(os.Args[2]+fileName, []byte(req.body), 0644)
 	if err != nil {
 		fmt.Printf("Error writing file %s: %s", fileName, err.Error())
-		conn.Write([]byte(errResponse.ToString()))
+		conn.Write(errResponse.ToBytes())
 		return
 	}
 
@@ -98,7 +112,7 @@ func handleWriteFile(conn net.Conn, req HttpRequest) {
 		code:    http.StatusCreated,
 		message: "Created",
 	}
-	conn.Write([]byte(okResponse.ToString()))
+	conn.Write(okResponse.ToBytes())
 }
 
 func reqHandler(conn net.Conn, ch chan net.Conn) {
